@@ -143,7 +143,7 @@ cd backend
 go test ./...
 go vet ./...
 # DATABASE_URL и JWT_SECRET обязательны; MIGRATIONS_DIR по умолчанию ../db.
-go run .
+go run ./cmd/server
 ```
 
 В другом терминале:
@@ -170,3 +170,15 @@ TEST_DATABASE_URL='postgres://user:password@localhost:5432/test?sslmode=disable'
 Архитектура, ограничения и результаты проверок: [docs/architecture.md](docs/architecture.md)
 и [docs/verification.md](docs/verification.md). Настоящие Telegram и внешний ИИ требуют
 ваших ключей для внешней приёмки. HTTPS и резервное копирование настраиваются на хостинге.
+
+## Разделение слоёв
+
+Backend запускается из `backend/cmd/server`. В `backend/internal/` находятся
+отдельные пакеты domain, service, repository/postgres, transport/httpapi,
+transport/telegram, security и translation. Сервисы зависят от своих интерфейсов
+репозитория и не используют SQL, pgx или Gin. SQL и маппинг результатов находятся
+только в PostgreSQL-адаптере. Зависимости создаются в main и передаются конструкторам.
+
+Подробная схема и обязанности пакетов: [docs/architecture.md](docs/architecture.md).
+Границы защищены архитектурным тестом; бизнес-логика входа проверяется с подменой
+репозитория без БД. Миграции отформатированы без изменения номеров и операций.
