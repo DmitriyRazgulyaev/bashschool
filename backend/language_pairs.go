@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"regexp"
-	"strings"
 )
 
 type languagePair struct {

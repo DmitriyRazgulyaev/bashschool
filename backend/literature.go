@@ -211,7 +211,8 @@ func literatureDrafts(c *gin.Context) {
 	pair := c.DefaultQuery("langPair", "ba-ru")
 	rows, err := db.Query(c.Request.Context(), `SELECT f.id,f.text_ba,m.title,COALESCE(f.chapter,''),
  (SELECT count(*) FROM candidates ca WHERE ca.fragment_id=f.id AND ca.lang_pair=$1),f.review_status,f.source_lang,
- ai.reference_translation,ai.wrong_translation,ai.error_explanation
+ COALESCE((SELECT ca.translation FROM candidates ca WHERE ca.fragment_id=f.id AND ca.lang_pair=$1 AND ca.is_seed AND ca.is_correct=true LIMIT 1),ai.reference_translation),
+ COALESCE((SELECT ca.translation FROM candidates ca WHERE ca.fragment_id=f.id AND ca.lang_pair=$1 AND ca.is_seed AND ca.is_correct=false LIMIT 1),ai.wrong_translation),ai.error_explanation
  FROM fragments f JOIN materials m ON m.id=f.material_id
  LEFT JOIN fragment_ai_suggestions ai ON ai.fragment_id=f.id AND ai.lang_pair=$1
  WHERE f.review_status='draft'
@@ -365,23 +366,41 @@ func publishLiteratureFragment(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	// Require a human-reviewed AI pair (not merely two arbitrary candidates).
-	var count int
-	err := db.QueryRow(ctx, `SELECT count(*) FROM fragment_ai_suggestions s
- JOIN candidates correct ON correct.fragment_id=s.fragment_id AND correct.lang_pair=s.lang_pair AND correct.translation=s.reference_translation
- JOIN candidates wrong ON wrong.fragment_id=s.fragment_id AND wrong.lang_pair=s.lang_pair AND wrong.translation=s.wrong_translation
- WHERE s.fragment_id=$1 AND s.lang_pair=$2 AND s.reference_translation<>s.wrong_translation`, c.Param("id"), in.LanguagePair).Scan(&count)
-	if err != nil || count == 0 {
-		fail(c, 409, "NEEDS_AI_REVIEW", "Сначала сгенерируйте варианты перевода и проверьте их вручную")
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка транзакции")
 		return
 	}
-	tag, err := db.Exec(ctx, `UPDATE fragments SET review_status='published',review_author=$2,reviewed_at=now() WHERE id=$1 AND review_status='draft'`, c.Param("id"), uid(c))
+	defer tx.Rollback(ctx)
+	var reviewStatus string
+	if err = tx.QueryRow(ctx, `SELECT review_status FROM fragments WHERE id=$1 FOR UPDATE`, c.Param("id")).Scan(&reviewStatus); err != nil {
+		fail(c, 404, "NOT_FOUND", "Фрагмент не найден")
+		return
+	}
+	if reviewStatus != "draft" {
+		fail(c, 409, "NOT_DRAFT", "Фрагмент уже обработан")
+		return
+	}
+	var count int
+	err = tx.QueryRow(ctx, `SELECT count(*) FROM candidates c JOIN fragments f ON f.id=c.fragment_id
+      JOIN language_pairs lp ON lp.code=c.lang_pair AND lp.source_lang=f.source_lang AND lp.active
+      WHERE c.fragment_id=$1 AND c.lang_pair=$2 AND c.is_seed AND c.is_correct IS NOT NULL
+      HAVING bool_or(c.is_correct) AND bool_or(NOT c.is_correct)`, c.Param("id"), in.LanguagePair).Scan(&count)
+	if err != nil || count < 2 {
+		fail(c, 409, "NEEDS_REVIEW", "Сохраните и проверьте правильный и ошибочный варианты перевода перед публикацией")
+		return
+	}
+	tag, err := tx.Exec(ctx, `UPDATE fragments SET review_status='published',review_author=$2,reviewed_at=now() WHERE id=$1 AND review_status='draft'`, c.Param("id"), uid(c))
 	if err != nil {
 		fail(c, 500, "DB_ERROR", "Не удалось опубликовать")
 		return
 	}
 	if tag.RowsAffected() == 0 {
 		fail(c, 409, "NOT_DRAFT", "Фрагмент уже обработан")
+		return
+	}
+	if err = tx.Commit(ctx); err != nil {
+		fail(c, 500, "DB_ERROR", "Не удалось опубликовать")
 		return
 	}
 	jsonOK(c, gin.H{"status": "published", "message": "Фрагмент опубликован. Перевод считается предложенным, а не экспертно подтверждённым."})

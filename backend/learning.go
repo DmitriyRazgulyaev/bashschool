@@ -2,16 +2,36 @@ package main
 
 import (
 	"context"
-	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 )
 
 type taskRecord struct {
 	ID, FragmentID, Text, Translation, Pair, Status string
 	BaseXP                                          int
+	Source                                          taskSource `json:"source"`
+}
+
+type taskSource struct {
+	MaterialID  string `json:"materialId"`
+	Title       string `json:"title"`
+	Chapter     string `json:"chapter"`
+	StartOffset *int   `json:"startOffset"`
+	EndOffset   *int   `json:"endOffset"`
+	StartTimeMS *int64 `json:"startTimeMs"`
+	EndTimeMS   *int64 `json:"endTimeMs"`
+	HasAudio    bool   `json:"hasAudio"`
+}
+
+func loadTaskSource(ctx context.Context, fragmentID string) (taskSource, error) {
+	var source taskSource
+	err := db.QueryRow(ctx, `SELECT m.id,m.title,COALESCE(f.chapter,''),f.start_offset,f.end_offset,f.start_ms,f.end_ms,m.audio_data IS NOT NULL FROM fragments f JOIN materials m ON m.id=f.material_id WHERE f.id=$1`, fragmentID).Scan(&source.MaterialID, &source.Title, &source.Chapter, &source.StartOffset, &source.EndOffset, &source.StartTimeMS, &source.EndTimeMS, &source.HasAudio)
+	return source, err
 }
 
 func getDaily(ctx context.Context, userID, pair string) (taskRecord, error) {
@@ -19,17 +39,21 @@ func getDaily(ctx context.Context, userID, pair string) (taskRecord, error) {
 	err := db.QueryRow(ctx, `SELECT t.id,t.fragment_id,f.text_ba,c.translation,t.lang_pair,t.status FROM tasks t JOIN fragments f ON f.id=t.fragment_id JOIN candidates c ON c.id=t.candidate_id WHERE t.user_id=$1 AND t.lang_pair=$2 AND t.assigned_date=CURRENT_DATE AND t.status='pending'`, userID, pair).Scan(&t.ID, &t.FragmentID, &t.Text, &t.Translation, &t.Pair, &t.Status)
 	if err == nil {
 		t.BaseXP = 10
-		return t, nil
+		t.Source, err = loadTaskSource(ctx, t.FragmentID)
+		return t, err
 	}
 	if err != pgx.ErrNoRows {
 		return t, err
 	}
-	err = db.QueryRow(ctx, `WITH chosen AS (SELECT f.id AS fid,c.id AS cid FROM fragments f JOIN candidates c ON c.fragment_id=f.id AND c.lang_pair=$2 JOIN language_pairs lp ON lp.code=c.lang_pair AND lp.source_lang=f.source_lang AND lp.active=true WHERE f.review_status='published' AND NOT EXISTS(SELECT 1 FROM tasks old WHERE old.user_id=$1 AND old.fragment_id=f.id) ORDER BY random() LIMIT 1), fallback AS (SELECT f.id fid,c.id cid FROM fragments f JOIN candidates c ON c.fragment_id=f.id AND c.lang_pair=$2 JOIN language_pairs lp ON lp.code=c.lang_pair AND lp.source_lang=f.source_lang AND lp.active=true WHERE f.review_status='published' ORDER BY random() LIMIT 1), selected AS(SELECT * FROM chosen UNION ALL SELECT * FROM fallback WHERE NOT EXISTS(SELECT 1 FROM chosen) LIMIT 1) INSERT INTO tasks(user_id,fragment_id,candidate_id,lang_pair) SELECT $1,fid,cid,$2 FROM selected ON CONFLICT(user_id,lang_pair,assigned_date) WHERE status='pending' DO UPDATE SET user_id=EXCLUDED.user_id RETURNING id`, userID, pair).Scan(&t.ID)
+	err = db.QueryRow(ctx, `WITH chosen AS (SELECT f.id AS fid,c.id AS cid FROM fragments f JOIN candidates c ON c.fragment_id=f.id AND c.lang_pair=$2 JOIN language_pairs lp ON lp.code=c.lang_pair AND lp.source_lang=f.source_lang AND lp.active=true WHERE f.review_status='published' AND c.is_seed AND NOT EXISTS(SELECT 1 FROM tasks old WHERE old.user_id=$1 AND old.fragment_id=f.id AND old.lang_pair=$2) ORDER BY random() LIMIT 1), selected AS (SELECT * FROM chosen) INSERT INTO tasks(user_id,fragment_id,candidate_id,lang_pair) SELECT $1,fid,cid,$2 FROM selected ON CONFLICT(user_id,lang_pair,assigned_date) WHERE status='pending' DO UPDATE SET user_id=EXCLUDED.user_id RETURNING id`, userID, pair).Scan(&t.ID)
 	if err != nil {
 		return t, err
 	}
 	err = db.QueryRow(ctx, `SELECT t.fragment_id,f.text_ba,c.translation,t.lang_pair,t.status FROM tasks t JOIN fragments f ON f.id=t.fragment_id JOIN candidates c ON c.id=t.candidate_id WHERE t.id=$1`, t.ID).Scan(&t.FragmentID, &t.Text, &t.Translation, &t.Pair, &t.Status)
 	t.BaseXP = 10
+	if err == nil {
+		t.Source, err = loadTaskSource(ctx, t.FragmentID)
+	}
 	return t, err
 }
 func dailyTask(c *gin.Context) {
@@ -41,13 +65,13 @@ func dailyTask(c *gin.Context) {
 	t, err := getDaily(c, uid(c), pair)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			fail(c, 404, "NO_TASKS_FOR_PAIR", "Для этой пары ещё нет фрагментов с предложенными переводами. Администратор должен добавить контент.")
+			fail(c, 404, "NO_TASKS_FOR_PAIR", "Доступные задания закончились. Выберите другую пару или дождитесь новых материалов.")
 			return
 		}
 		fail(c, 500, "TASK_ERROR", "Не удалось получить задание")
 		return
 	}
-	jsonOK(c, gin.H{"taskId": t.ID, "fragmentId": t.FragmentID, "sourceText": t.Text, "suggestedTranslation": t.Translation, "languagePair": t.Pair, "status": t.Status, "taskType": "translation_review", "reward": gin.H{"baseXp": t.BaseXP}})
+	jsonOK(c, gin.H{"taskId": t.ID, "fragmentId": t.FragmentID, "sourceText": t.Text, "source": t.Source, "suggestedTranslation": t.Translation, "languagePair": t.Pair, "status": t.Status, "taskType": "translation_review", "reward": gin.H{"baseXp": t.BaseXP}})
 }
 func history(c *gin.Context) {
 	limit := numeric(c, "limit", 20, 100)
@@ -104,13 +128,35 @@ func answerCore(ctx context.Context, userID, taskID string, in answerInput) (gin
 	}
 	if status == "completed" {
 		var key string
-		err = tx.QueryRow(ctx, `SELECT idempotency_key FROM answers WHERE task_id=$1`, taskID).Scan(&key)
+		var receipt []byte
+		err = tx.QueryRow(ctx, `SELECT idempotency_key,result FROM answers WHERE task_id=$1`, taskID).Scan(&key, &receipt)
 		if err == nil && key == in.IdempotencyKey {
-			var xp, streak int
-			_ = tx.QueryRow(ctx, `SELECT xp,streak FROM users WHERE id=$1`, userID).Scan(&xp, &streak)
-			return gin.H{"status": "accepted", "xpEarned": 10, "totalXp": xp, "streak": streak, "alreadyProcessed": true}, 200, "", ""
+			out := gin.H{}
+			if len(receipt) > 0 {
+				if err = json.Unmarshal(receipt, &out); err != nil {
+					return nil, 500, "DB_ERROR", "Не удалось прочитать результат"
+				}
+			} else {
+				var xp, streak int
+				if err = tx.QueryRow(ctx, `SELECT xp,streak FROM users WHERE id=$1`, userID).Scan(&xp, &streak); err != nil {
+					return nil, 500, "DB_ERROR", "Ошибка чтения прогресса"
+				}
+				out = gin.H{"status": "accepted", "xpEarned": 0, "baseXp": 0, "questBonusXp": 0, "totalXp": xp, "streak": streak, "unlockedQuests": []string{}}
+			}
+			out["alreadyProcessed"] = true
+			return out, 200, "", ""
 		}
 		return nil, 409, "TASK_ALREADY_COMPLETED", "Задание уже выполнено"
+	}
+	if in.AnswerType != "confirmation" && in.AnswerType != "correction" {
+		return nil, 422, "INVALID_ANSWER", "Неизвестный тип ответа"
+	}
+	if len(in.Translation) > 8000 || len([]rune(in.Translation)) > 2000 {
+		return nil, 422, "TRANSLATION_TOO_LONG", "Перевод должен содержать не более 2000 символов"
+	}
+	var lockedFragment string
+	if err = tx.QueryRow(ctx, `SELECT id FROM fragments WHERE id=$1 FOR UPDATE`, fragmentID).Scan(&lockedFragment); err != nil {
+		return nil, 500, "DB_ERROR", "Не удалось заблокировать фрагмент"
 	}
 	translation := strings.TrimSpace(in.Translation)
 	if translation == "" {
@@ -142,66 +188,26 @@ func answerCore(ctx context.Context, userID, taskID string, in answerInput) (gin
 	if err != nil {
 		return nil, 500, "DB_ERROR", "Ошибка прогресса"
 	}
-	// Count votes from independent users for this fragment and language pair.
-	// All SQL errors must be handled, otherwise PostgreSQL aborts the transaction.
-	var winnerVotes, distinctUsers int
-	var winner string
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(DISTINCT a.user_id)
-		FROM answers a
-		JOIN tasks t ON t.id = a.task_id
-		WHERE t.fragment_id = $1 AND t.lang_pair = $2
-	`, fragmentID, pair).Scan(&distinctUsers)
-	if err != nil {
-		return nil, 500, "DB_ERROR", "Ошибка подсчёта участников"
-	}
-
-	err = tx.QueryRow(ctx, `
-		SELECT c.translation, COUNT(DISTINCT a.user_id) AS votes
-		FROM answers a
-		JOIN tasks t ON t.id = a.task_id
-		JOIN candidates c ON c.id = a.candidate_id
-		WHERE t.fragment_id = $1 AND t.lang_pair = $2
-		GROUP BY c.id, c.translation
-		ORDER BY votes DESC, c.id
-		LIMIT 1
-	`, fragmentID, pair).Scan(&winner, &winnerVotes)
-	if err != nil {
-		return nil, 500, "DB_ERROR", "Ошибка определения перевода"
-	}
-
-	if distinctUsers >= 5 && winnerVotes*100 >= distinctUsers*80 {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO translations(fragment_id,lang_pair,translation,confirmed,status)
-			VALUES($1,$2,$3,$4,'confirmed')
-			ON CONFLICT(fragment_id,lang_pair) DO UPDATE
-			SET translation=EXCLUDED.translation,
-			    confirmed=EXCLUDED.confirmed,
-			    status='confirmed',
-			    updated_at=now()
-		`, fragmentID, pair, winner, winnerVotes)
-		if err != nil {
-			return nil, 500, "DB_ERROR", "Ошибка согласования"
-		}
-	}
-	if distinctUsers >= 5 && winnerVotes*100 < distinctUsers*80 {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO moderation_cases(fragment_id,lang_pair)
-			VALUES($1,$2) ON CONFLICT DO NOTHING
-		`, fragmentID, pair)
-		if err != nil {
-			return nil, 500, "DB_ERROR", "Ошибка создания заявки модерации"
-		}
+	if err = reconcileTranslation(ctx, tx, fragmentID, pair); err != nil {
+		return nil, 500, "CONSENSUS_ERROR", "Не удалось согласовать перевод"
 	}
 	bonusXP, unlockedQuests, err := awardDailyQuestBonuses(ctx, tx, userID)
 	if err != nil {
 		return nil, 500, "QUEST_ERROR", "Не удалось обновить ежедневные цели"
 	}
 	xp += bonusXP
+	out := gin.H{"status": "accepted", "xpEarned": 10 + bonusXP, "baseXp": 10, "questBonusXp": bonusXP, "unlockedQuests": unlockedQuests, "totalXp": xp, "streak": streak}
+	receipt, err := json.Marshal(out)
+	if err != nil {
+		return nil, 500, "RECEIPT_ERROR", "Не удалось сохранить результат"
+	}
+	if _, err = tx.Exec(ctx, `UPDATE answers SET result=$2 WHERE task_id=$1`, taskID, receipt); err != nil {
+		return nil, 500, "DB_ERROR", "Не удалось сохранить результат"
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, 500, "DB_ERROR", "Ошибка фиксации"
 	}
-	return gin.H{"status": "accepted", "xpEarned": 10 + bonusXP, "baseXp": 10, "questBonusXp": bonusXP, "unlockedQuests": unlockedQuests, "totalXp": xp, "streak": streak}, http.StatusOK, "", ""
+	return out, http.StatusOK, "", ""
 }
 
 func taskDetail(c *gin.Context) {

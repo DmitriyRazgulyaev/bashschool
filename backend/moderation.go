@@ -13,10 +13,18 @@ func cases(c *gin.Context) {
 	for rows.Next() {
 		var id, fragment, text, pair, status string
 		var created any
-		if rows.Scan(&id, &fragment, &text, &pair, &status, &created) == nil {
+		if err := rows.Scan(&id, &fragment, &text, &pair, &status, &created); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			arr = append(arr, gin.H{"id": id, "fragmentId": fragment, "textBa": text, "langPair": pair, "status": status, "createdAt": created})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, arr)
 }
 func resolveCase(c *gin.Context) {
@@ -34,14 +42,32 @@ func resolveCase(c *gin.Context) {
 	}
 	defer tx.Rollback(c)
 	var fid, pair, tr string
-	err = tx.QueryRow(c, `SELECT mc.fragment_id,mc.lang_pair,ca.translation FROM moderation_cases mc JOIN candidates ca ON ca.id=$2 AND ca.fragment_id=mc.fragment_id AND ca.lang_pair=mc.lang_pair WHERE mc.id=$1 AND mc.status='open' FOR UPDATE OF mc`, c.Param("id"), in.CandidateID).Scan(&fid, &pair, &tr)
+	err = tx.QueryRow(c, `SELECT mc.fragment_id,mc.lang_pair,ca.translation FROM moderation_cases mc JOIN candidates ca ON ca.id=$2 AND ca.fragment_id=mc.fragment_id AND ca.lang_pair=mc.lang_pair WHERE mc.id=$1 AND mc.status='open' `, c.Param("id"), in.CandidateID).Scan(&fid, &pair, &tr)
 	if err != nil {
 		fail(c, 404, "NOT_FOUND", "Спор или вариант не найден")
 		return
 	}
+	var lockedFragment string
+	if err = tx.QueryRow(c, `SELECT id FROM fragments WHERE id=$1 FOR UPDATE`, fid).Scan(&lockedFragment); err != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка блокировки")
+		return
+	}
+	var open bool
+	if err = tx.QueryRow(c, `SELECT status='open' FROM moderation_cases WHERE id=$1 FOR UPDATE`, c.Param("id")).Scan(&open); err != nil || !open {
+		fail(c, 409, "CASE_CHANGED", "Спор уже рассмотрен. Обновите список.")
+		return
+	}
 	var votes int
-	_ = tx.QueryRow(c, `SELECT count(DISTINCT a.user_id) FROM answers a JOIN tasks t ON t.id=a.task_id WHERE t.fragment_id=$1 AND t.lang_pair=$2 AND a.candidate_id=$3`, fid, pair, in.CandidateID).Scan(&votes)
-	_, err = tx.Exec(c, `INSERT INTO translations(fragment_id,lang_pair,translation,confirmed,status) VALUES($1,$2,$3,$4,'confirmed') ON CONFLICT(fragment_id,lang_pair) DO UPDATE SET translation=EXCLUDED.translation,confirmed=EXCLUDED.confirmed,status='confirmed',updated_at=now()`, fid, pair, tr, votes)
+	err = tx.QueryRow(c, `SELECT count(*) FROM (SELECT DISTINCT ON (a.user_id) a.user_id,a.candidate_id FROM answers a JOIN tasks t ON t.id=a.task_id WHERE t.fragment_id=$1 AND t.lang_pair=$2 ORDER BY a.user_id,a.created_at DESC,a.id DESC) latest JOIN candidates ca ON ca.id=latest.candidate_id LEFT JOIN candidates root ON root.id=ca.canonical_id WHERE normalize_translation(COALESCE(root.translation,ca.translation))=normalize_translation($3)`, fid, pair, tr).Scan(&votes)
+	if err != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка подсчёта голосов")
+		return
+	}
+	if _, err = tx.Exec(c, `UPDATE candidates ca SET is_correct=(normalize_translation(COALESCE((SELECT r.translation FROM candidates r WHERE r.id=ca.canonical_id),ca.translation))=normalize_translation($3)) WHERE ca.fragment_id=$1 AND ca.lang_pair=$2`, fid, pair, tr); err != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка обновления эталона")
+		return
+	}
+	_, err = tx.Exec(c, `INSERT INTO translations(fragment_id,lang_pair,translation,confirmed,status,expert_confirmed) VALUES($1,$2,$3,$4,'confirmed',true) ON CONFLICT(fragment_id,lang_pair) DO UPDATE SET translation=EXCLUDED.translation,confirmed=EXCLUDED.confirmed,status='confirmed',expert_confirmed=true,updated_at=now()`, fid, pair, tr, votes)
 	if err == nil {
 		_, err = tx.Exec(c, `UPDATE moderation_cases SET status='resolved',selected_translation=$1,reviewer_id=$2,resolved_at=now() WHERE id=$3`, tr, uid(c), c.Param("id"))
 	}
@@ -63,10 +89,18 @@ func fragmentCandidates(c *gin.Context) {
 	for rows.Next() {
 		var id, tr string
 		var votes int
-		if rows.Scan(&id, &tr, &votes) == nil {
+		if err := rows.Scan(&id, &tr, &votes); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			out = append(out, gin.H{"id": id, "translation": tr, "votes": votes})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, out)
 }
 

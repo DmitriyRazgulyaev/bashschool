@@ -12,10 +12,18 @@ func schools(c *gin.Context) {
 	arr := []gin.H{}
 	for rows.Next() {
 		var id, name string
-		if rows.Scan(&id, &name) == nil {
+		if err := rows.Scan(&id, &name); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			arr = append(arr, gin.H{"id": id, "name": name})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, arr)
 }
 func myClasses(c *gin.Context) {
@@ -28,10 +36,18 @@ func myClasses(c *gin.Context) {
 	arr := []gin.H{}
 	for rows.Next() {
 		var id, name, school, teacher string
-		if rows.Scan(&id, &name, &school, &teacher) == nil {
+		if err := rows.Scan(&id, &name, &school, &teacher); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			arr = append(arr, gin.H{"id": id, "name": name, "school": school, "teacherId": teacher})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, arr)
 }
 func createClass(c *gin.Context) {
@@ -69,8 +85,8 @@ func addStudent(c *gin.Context) {
 	if !bindingJSON(c, &in) {
 		return
 	}
-	_, err := db.Exec(c, `INSERT INTO class_members(class_id,user_id) SELECT $1,id FROM users WHERE id=$2 AND role='student' ON CONFLICT DO NOTHING`, c.Param("id"), in.StudentID)
-	if err != nil {
+	tag, err := db.Exec(c, `INSERT INTO class_members(class_id,user_id) SELECT $1,id FROM users WHERE id=$2 AND role='student' ON CONFLICT DO UPDATE SET user_id=EXCLUDED.user_id`, c.Param("id"), in.StudentID)
+	if err != nil || tag.RowsAffected() != 1 {
 		fail(c, 422, "INVALID_STUDENT", "Не удалось добавить ученика")
 		return
 	}
@@ -90,10 +106,18 @@ func classStudents(c *gin.Context) {
 	for rows.Next() {
 		var id, name string
 		var xp, streak, completed int
-		if rows.Scan(&id, &name, &xp, &streak, &completed) == nil {
+		if err := rows.Scan(&id, &name, &xp, &streak, &completed); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			arr = append(arr, gin.H{"userId": id, "displayName": name, "totalXp": xp, "currentStreak": streak, "completedTasks": completed})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, arr)
 }
 func classStatistics(c *gin.Context) {

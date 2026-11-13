@@ -9,10 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 var jwtSecret []byte
@@ -65,9 +66,15 @@ func auth(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	id, role, err := parseToken(strings.TrimPrefix(h, "Bearer "))
+	id, _, err := parseToken(strings.TrimPrefix(h, "Bearer "))
 	if err != nil {
 		fail(c, 401, "UNAUTHORIZED", "Недействительный токен")
+		c.Abort()
+		return
+	}
+	var role string
+	if err = db.QueryRow(c, `SELECT role FROM users WHERE id=$1`, id).Scan(&role); err != nil {
+		fail(c, 401, "UNAUTHORIZED", "Сессия недоступна. Войдите снова.")
 		c.Abort()
 		return
 	}

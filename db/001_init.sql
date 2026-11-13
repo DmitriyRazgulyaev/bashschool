@@ -35,4 +35,4 @@ WITH m AS (SELECT id FROM materials WHERE title='Учебные фразы' LIMI
  ('Был минең китабым.','Это моя книга.','Это мой дом.')
 ), inserted AS (INSERT INTO fragments(material_id,text_ba,chapter) SELECT m.id,p.ba,'Базовые фразы' FROM phrases p CROSS JOIN m WHERE NOT EXISTS (SELECT 1 FROM fragments f WHERE f.text_ba=p.ba) RETURNING id,text_ba)
 INSERT INTO candidates(fragment_id,lang_pair,translation,is_seed)
-SELECT f.id,'ba-ru',v.translation,true FROM fragments f JOIN phrases p ON f.text_ba=p.ba CROSS JOIN LATERAL (VALUES (p.ru),(p.wrong)) v(translation) ON CONFLICT DO NOTHING;
+SELECT f.id,'ba-ru',v.translation,true FROM (SELECT id,text_ba FROM inserted UNION ALL SELECT id,text_ba FROM fragments) f JOIN phrases p ON f.text_ba=p.ba CROSS JOIN LATERAL (VALUES (p.ru),(p.wrong)) v(translation) ON CONFLICT DO NOTHING;

@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
-	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5"
-	"golang.org/x/crypto/bcrypt"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type registerInput struct {
 	Email        string `json:"email" binding:"required,email"`
-	Password     string `json:"password" binding:"required,min=8"`
+	Password     string `json:"password" binding:"required,min=8,max=72"`
 	DisplayName  string `json:"displayName" binding:"required,min=2"`
 	LanguagePair string `json:"languagePair"`
 }
@@ -32,6 +36,10 @@ func register(c *gin.Context) {
 		fail(c, 422, "INVALID_PAIR", "Языковая пара не найдена или отключена")
 		return
 	}
+	if len(in.Password) > 72 {
+		fail(c, 422, "INVALID_PASSWORD", "Пароль должен быть не длиннее 72 байт")
+		return
+	}
 	pwd, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
 	if err != nil {
 		fail(c, 500, "SERVER_ERROR", "Ошибка хеширования")
@@ -40,10 +48,20 @@ func register(c *gin.Context) {
 	var id string
 	err = db.QueryRow(c, `INSERT INTO users(email,password_hash,display_name,language_pair) VALUES(lower($1),$2,$3,$4) RETURNING id`, strings.TrimSpace(in.Email), string(pwd), in.DisplayName, in.LanguagePair).Scan(&id)
 	if err != nil {
-		fail(c, 409, "EMAIL_EXISTS", "Email уже используется")
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			fail(c, http.StatusConflict, "EMAIL_EXISTS", "Эта почта уже зарегистрирована. Войдите в аккаунт.")
+		} else {
+			slog.Error("registration failed", "error", err)
+			fail(c, http.StatusInternalServerError, "DB_ERROR", "Не удалось создать аккаунт. Попробуйте позже.")
+		}
 		return
 	}
-	t, _ := tokenFor(id, "student")
+	t, err := tokenFor(id, "student")
+	if err != nil {
+		fail(c, 500, "TOKEN_ERROR", "Не удалось создать сессию")
+		return
+	}
 	c.JSON(201, gin.H{"accessToken": t, "user": gin.H{"id": id, "displayName": in.DisplayName, "role": "student", "languagePair": in.LanguagePair}})
 }
 func login(c *gin.Context) {
@@ -53,11 +71,24 @@ func login(c *gin.Context) {
 	}
 	var id, hash, role, name, pair string
 	err := db.QueryRow(c, `SELECT id,password_hash,role,display_name,language_pair FROM users WHERE email=lower($1)`, strings.TrimSpace(in.Email)).Scan(&id, &hash, &role, &name, &pair)
-	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
+		fail(c, http.StatusNotFound, "EMAIL_NOT_FOUND", "Пользователь с такой почтой не зарегистрирован. Создайте аккаунт.")
+		return
+	}
+	if err != nil {
+		slog.Error("login lookup failed", "error", err)
+		fail(c, http.StatusInternalServerError, "DB_ERROR", "Не удалось выполнить вход. Попробуйте позже.")
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
 		fail(c, 401, "INVALID_CREDENTIALS", "Неверный email или пароль")
 		return
 	}
-	t, _ := tokenFor(id, role)
+	t, err := tokenFor(id, role)
+	if err != nil {
+		fail(c, 500, "TOKEN_ERROR", "Не удалось создать сессию")
+		return
+	}
 	jsonOK(c, gin.H{"accessToken": t, "user": gin.H{"id": id, "displayName": name, "role": role, "languagePair": pair}})
 }
 func me(c *gin.Context) {
@@ -139,5 +170,3 @@ func bindTelegram(ctx context.Context, tg int64, code string) error {
 	}
 	return tx.Commit(ctx)
 }
-
-var _ = http.StatusOK

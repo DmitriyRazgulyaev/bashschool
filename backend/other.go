@@ -1,18 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
-	"fmt"
-	"github.com/gin-gonic/gin"
-	"net/http"
 	"strconv"
-	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 func progress(c *gin.Context) {
 	var xp, streak, longest, completed, confirmed int
-	err := db.QueryRow(c, `SELECT xp,streak,longest_streak,(SELECT count(*) FROM tasks WHERE user_id=$1 AND status='completed'),(SELECT count(*) FROM answers a JOIN translations tr ON tr.fragment_id=(SELECT fragment_id FROM tasks WHERE id=a.task_id) AND tr.translation=a.translation AND tr.status='confirmed' WHERE a.user_id=$1) FROM users WHERE id=$1`, uid(c)).Scan(&xp, &streak, &longest, &completed, &confirmed)
+	err := db.QueryRow(c, `SELECT xp,streak,longest_streak,(SELECT count(*) FROM tasks WHERE user_id=$1 AND status='completed'),(SELECT count(*) FROM answers a JOIN translations tr ON tr.fragment_id=(SELECT fragment_id FROM tasks WHERE id=a.task_id) AND tr.lang_pair=(SELECT lang_pair FROM tasks WHERE id=a.task_id) AND tr.translation=a.translation AND tr.status='confirmed' WHERE a.user_id=$1) FROM users WHERE id=$1`, uid(c)).Scan(&xp, &streak, &longest, &completed, &confirmed)
 	if err != nil {
 		fail(c, 500, "DB_ERROR", "Не удалось получить прогресс")
 		return
@@ -22,7 +21,10 @@ func progress(c *gin.Context) {
 }
 func achievements(c *gin.Context) {
 	var done int
-	_ = db.QueryRow(c, `SELECT count(*) FROM tasks WHERE user_id=$1 AND status='completed'`, uid(c)).Scan(&done)
+	if err := db.QueryRow(c, `SELECT count(*) FROM tasks WHERE user_id=$1 AND status='completed'`, uid(c)).Scan(&done); err != nil {
+		fail(c, 500, "DB_ERROR", "Не удалось получить достижения")
+		return
+	}
 	rows, err := db.Query(c, `SELECT code,title,description,threshold FROM achievements ORDER BY threshold`)
 	if err != nil {
 		fail(c, 500, "DB_ERROR", "Ошибка достижений")
@@ -33,71 +35,19 @@ func achievements(c *gin.Context) {
 	for rows.Next() {
 		var code, title, desc string
 		var threshold int
-		if rows.Scan(&code, &title, &desc, &threshold) == nil {
+		if err := rows.Scan(&code, &title, &desc, &threshold); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			out = append(out, gin.H{"code": code, "name": title, "description": desc, "unlocked": done >= threshold, "threshold": threshold})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, out)
-}
-func leaderboard(c *gin.Context) {
-	scope := c.DefaultQuery("scope", "global")
-	period := c.DefaultQuery("period", "all")
-	metric := c.DefaultQuery("metric", "xp")
-	if metric != "xp" && metric != "activity" {
-		fail(c, 422, "BAD_METRIC", "Доступны xp и activity")
-		return
-	}
-	if period != "all" && period != "weekly" && period != "monthly" {
-		fail(c, 422, "BAD_PERIOD", "Недопустимый период")
-		return
-	}
-	if scope != "global" && scope != "school" && scope != "class" {
-		fail(c, 422, "BAD_SCOPE", "Недопустимый рейтинг")
-		return
-	}
-	periodSQL := ""
-	if period == "weekly" {
-		periodSQL = " AND e.created_at >= date_trunc('week', now())"
-	} else if period == "monthly" {
-		periodSQL = " AND e.created_at >= date_trunc('month', now())"
-	}
-	agg := "COALESCE(sum(e.amount),0)"
-	if metric == "activity" {
-		agg = "count(e.id)"
-	}
-	groupBy := "u.id,u.display_name"
-	join := ""
-	idExpr := "u.id::text"
-	nameExpr := "u.display_name"
-	if scope == "school" {
-		join = " JOIN schools s ON s.id=u.school_id "
-		groupBy = "s.id,s.name"
-		idExpr = "s.id::text"
-		nameExpr = "s.name"
-	} else if scope == "class" {
-		join = " JOIN class_members cm ON cm.user_id=u.id JOIN classes cl ON cl.id=cm.class_id "
-		groupBy = "cl.id,cl.name"
-		idExpr = "cl.id::text"
-		nameExpr = "cl.name"
-	}
-	q := fmt.Sprintf(`SELECT %s,%s,%s AS score FROM users u %s LEFT JOIN xp_events e ON e.user_id=u.id %s WHERE u.role <> 'admin' GROUP BY %s ORDER BY score DESC,%s LIMIT 30`, idExpr, nameExpr, agg, join, periodSQL, groupBy, nameExpr)
-	rows, err := db.Query(c, q)
-	if err != nil {
-		fail(c, 500, "DB_ERROR", "Ошибка рейтинга")
-		return
-	}
-	defer rows.Close()
-	out := []gin.H{}
-	rank := 0
-	for rows.Next() {
-		var id, name string
-		var score int
-		if rows.Scan(&id, &name, &score) == nil {
-			rank++
-			out = append(out, gin.H{"rank": rank, "entityId": id, "displayName": name, "score": score})
-		}
-	}
-	jsonOK(c, gin.H{"scope": scope, "period": period, "metric": metric, "entries": out})
 }
 func materials(c *gin.Context) {
 	rows, err := db.Query(c, `SELECT id,title,kind,license,LEFT(COALESCE(body,''),180),created_at FROM materials ORDER BY created_at DESC LIMIT 100`)
@@ -110,10 +60,18 @@ func materials(c *gin.Context) {
 	for rows.Next() {
 		var id, title, kind, license, body string
 		var created any
-		if rows.Scan(&id, &title, &kind, &license, &body, &created) == nil {
+		if err := rows.Scan(&id, &title, &kind, &license, &body, &created); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			items = append(items, gin.H{"id": id, "title": title, "type": kind, "license": license, "description": body, "createdAt": created})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, items)
 }
 func fragments(c *gin.Context) {
@@ -126,14 +84,22 @@ func fragments(c *gin.Context) {
 	items := []gin.H{}
 	for rows.Next() {
 		var id, text, title, chapter string
-		if rows.Scan(&id, &text, &title, &chapter) == nil {
+		if err := rows.Scan(&id, &text, &title, &chapter); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			items = append(items, gin.H{"id": id, "textBa": text, "source": title, "chapter": chapter})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, items)
 }
 func translations(c *gin.Context) {
-	rows, err := db.Query(c, `SELECT t.id,t.fragment_id,f.text_ba,t.lang_pair,t.translation,t.confirmed,t.status,m.title,COALESCE(f.chapter,''),t.updated_at FROM translations t JOIN fragments f ON f.id=t.fragment_id JOIN materials m ON m.id=f.material_id WHERE ($1='' OR t.lang_pair=$1) ORDER BY t.updated_at DESC LIMIT 500`, c.DefaultQuery("langPair", ""))
+	rows, err := db.Query(c, `SELECT t.id,t.fragment_id,f.text_ba,t.lang_pair,t.translation,t.confirmed,t.status,m.title,COALESCE(f.chapter,''),t.updated_at FROM translations t JOIN fragments f ON f.id=t.fragment_id JOIN materials m ON m.id=f.material_id WHERE t.status='confirmed' AND ($1='' OR t.lang_pair=$1) ORDER BY t.updated_at DESC LIMIT 500`, c.DefaultQuery("langPair", ""))
 	if err != nil {
 		fail(c, 500, "DB_ERROR", "Ошибка переводов")
 		return
@@ -144,10 +110,18 @@ func translations(c *gin.Context) {
 		var id, fid, text, pair, tr, status, title, chapter string
 		var count int
 		var updated any
-		if rows.Scan(&id, &fid, &text, &pair, &tr, &count, &status, &title, &chapter, &updated) == nil {
+		if err := rows.Scan(&id, &fid, &text, &pair, &tr, &count, &status, &title, &chapter, &updated); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+			return
+		} else {
 			out = append(out, gin.H{"id": id, "fragmentId": fid, "textBa": text, "langPair": pair, "translation": tr, "confirmed": count, "status": status, "source": gin.H{"title": title, "chapter": chapter}, "updatedAt": updated})
 		}
 	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения данных")
+		return
+	}
+
 	jsonOK(c, out)
 }
 func exportTranslations(c *gin.Context) {
@@ -171,33 +145,46 @@ func exportTranslations(c *gin.Context) {
 		Confirmed   int             `json:"confirmed"`
 		Status      string          `json:"status"`
 	}
-	if format == "csv" {
-		c.Header("Content-Disposition", "attachment; filename=translations.csv")
-		c.Header("Content-Type", "text/csv; charset=utf-8")
-		w := csv.NewWriter(c.Writer)
-		_ = w.Write([]string{"fragment_id", "text_ba", "lang_pair", "translation", "source", "confirmed", "status"})
-		for rows.Next() {
-			var x item
-			var source string
-			if rows.Scan(&x.FragmentID, &x.TextBa, &x.LangPair, &x.Translation, &source, &x.Confirmed, &x.Status) == nil {
-				_ = w.Write([]string{x.FragmentID, x.TextBa, x.LangPair, x.Translation, source, strconv.Itoa(x.Confirmed), x.Status})
-			}
-		}
-		w.Flush()
-		return
-	}
 	out := []item{}
 	for rows.Next() {
-		var x item
+		var entry item
 		var source string
-		if rows.Scan(&x.FragmentID, &x.TextBa, &x.LangPair, &x.Translation, &source, &x.Confirmed, &x.Status) == nil {
-			x.Source = json.RawMessage(source)
-			out = append(out, x)
+		if err = rows.Scan(&entry.FragmentID, &entry.TextBa, &entry.LangPair, &entry.Translation, &source, &entry.Confirmed, &entry.Status); err != nil {
+			fail(c, 500, "DB_ERROR", "Ошибка чтения выгрузки")
+			return
+		}
+		entry.Source = json.RawMessage(source)
+		out = append(out, entry)
+	}
+	if rows.Err() != nil {
+		fail(c, 500, "DB_ERROR", "Ошибка чтения выгрузки")
+		return
+	}
+	c.Header("Content-Disposition", "attachment; filename=translations."+format)
+	if format == "json" {
+		c.JSON(200, out)
+		return
+	}
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	if err = writer.Write([]string{"fragment_id", "text_ba", "lang_pair", "translation", "source", "confirmed", "status"}); err != nil {
+		fail(c, 500, "EXPORT_ERROR", "Ошибка формирования CSV")
+		return
+	}
+	for _, entry := range out {
+		if err = writer.Write([]string{entry.FragmentID, entry.TextBa, entry.LangPair, entry.Translation, string(entry.Source), strconv.Itoa(entry.Confirmed), entry.Status}); err != nil {
+			fail(c, 500, "EXPORT_ERROR", "Ошибка формирования CSV")
+			return
 		}
 	}
-	c.Header("Content-Disposition", "attachment; filename=translations.json")
-	c.JSON(200, out)
+	writer.Flush()
+	if writer.Error() != nil {
+		fail(c, 500, "EXPORT_ERROR", "Ошибка формирования CSV")
+		return
+	}
+	c.Data(200, "text/csv; charset=utf-8", buffer.Bytes())
 }
+
 func addMaterial(c *gin.Context) {
 	var in struct {
 		Title       string `json:"title" binding:"required"`
@@ -246,10 +233,6 @@ func addFragment(c *gin.Context) {
 	}
 	c.JSON(201, gin.H{"id": id})
 }
-
-var _ = json.Marshal
-var _ = strings.TrimSpace
-var _ = http.MethodGet
 
 func materialDetail(c *gin.Context) {
 	var id, title, kind, license, description string
