@@ -1,30 +1,13 @@
-<<<<<<< HEAD
 .env
+*.env
+!.env.example
 node_modules/
 dist/
 *.log
 .idea/
 .vscode/
 .DS_Store
-=======
-# секреты
-.env
-*.env
-!.env.example
-
-# Python
-venv/
-.venv/
-__pycache__/
-*.pyc
-
-# Go
+Thumbs.db
 backend/bashschool
 backend/*.exe
-
-# IDE и система
-.idea/
-.vscode/
-.DS_Store
-Thumbs.db
->>>>>>> 4ddc20aa30e396d3a407de7a1555e5d108914de3
+coverage.out
