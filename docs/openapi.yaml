@@ -1,0 +1,645 @@
+openapi: 3.0.3
+info:
+  title: ТелемКүпер — Башкирская языковая школа
+  version: 1.0.0
+  description: REST API хакатонной платформы для парных переводов и геймификации.
+servers:
+  - url: http://localhost:8080/api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Users
+  - name: Learning
+  - name: Gamification
+  - name: Content
+  - name: Translation
+  - name: Education
+  - name: Moderation
+  - name: AI Literature
+paths:
+  /admin/literature/import:
+    post:
+      tags: [AI Literature]
+      summary: Импорт TXT-произведения; только администратор
+      description: Разбивает текст на черновики с исходными смещениями; требует подтверждение прав
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [title, license, rightsConfirmed]
+              properties:
+                title: {type: string}
+                author: {type: string}
+                license: {type: string}
+                copyrightNote: {type: string}
+                sourceLang: {type: string, example: ba}
+                segmentMode: {type: string, enum: [sentence, paragraph]}
+                rightsConfirmed: {type: string, enum: ['true']}
+                file: {type: string, format: binary, description: TXT UTF-8 up to 1MB}
+                text: {type: string, description: Alternative to file}
+      responses:
+        '201': {description: Material and unpublished fragments created}
+        '403': {description: Admin role required}
+        '422': {description: Input/rights validation failed}
+  /admin/literature/drafts:
+    get:
+      tags: [AI Literature]
+      summary: Список неопубликованных фрагментов; только admin
+      parameters:
+        - {name: langPair, in: query, schema: {type: string, default: ba-ru}}
+      responses:
+        '200': {description: Draft fragments with generated suggestions}
+        '403': {description: Admin role required}
+  /admin/literature/fragments/{id}/generate:
+    post:
+      tags: [AI Literature]
+      summary: Предложить верный и намеренно ошибочный перевод через внешний ИИ
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: langPair, in: query, schema: {type: string, default: ba-ru}}
+      responses:
+        '200': {description: Two unverified candidate translations and explanation}
+        '403': {description: Admin role required}
+        '503': {description: AI_API_KEY is not configured}
+  /admin/literature/fragments/{id}/publish:
+    post:
+      tags: [AI Literature]
+      summary: Публикация черновика после проверки администратором
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [languagePair]
+              properties:
+                languagePair: {type: string, example: ba-ru}
+      responses:
+        '200': {description: Fragment published to exercises}
+        '409': {description: AI candidates must be generated first}
+  /admin/literature/fragments/{id}/reject:
+    post:
+      tags: [AI Literature]
+      summary: Отклонить черновик
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Fragment rejected}
+  /daily-quests:
+    get:
+      tags: [Gamification]
+      summary: Ежедневные цели пользователя, прогресс и бонусы XP
+      description: |
+        Цели обновляются каждый календарный день по UTC. В рамках одного дня
+        награда за каждую цель начисляется автоматически и только один раз.
+        Прогресс считается по выполненным упражнениям независимо от языковой пары.
+      responses:
+        '200':
+          description: Список целей
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyQuestsResponse'}
+        '401': {$ref: '#/components/responses/ApiError'}
+  /auth/register:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Регистрация пользователя
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterRequest'}
+      responses:
+        '201':
+          description: Зарегистрирован
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuthResponse'}
+        '409': {$ref: '#/components/responses/ApiError'}
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Войти по email и паролю
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+      responses:
+        '200':
+          description: JWT и данные пользователя
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuthResponse'}
+        '401': {$ref: '#/components/responses/ApiError'}
+  /language-pairs:
+    get:
+      tags: [Users]
+      security: []
+      summary: Доступные языковые пары
+      responses:
+        '200':
+          description: Список
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/LanguagePair'}
+  /admin/language-pairs:
+    get:
+      tags: [Education]
+      summary: Все направления перевода, включая отключённые (только admin)
+      responses:
+        '200':
+          description: Массив языковых пар
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/LanguagePair'}
+    post:
+      tags: [Education]
+      summary: Добавить новое направление перевода (только admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceLang, targetLang, name]
+              properties:
+                sourceLang: {type: string, example: ba}
+                targetLang: {type: string, example: en}
+                name: {type: string, example: Башкирский → Английский}
+      responses:
+        '201':
+          description: Новая пара
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LanguagePair'}
+        '409': {$ref: '#/components/responses/ApiError'}
+  /admin/language-pairs/{code}:
+    patch:
+      tags: [Education]
+      summary: Переименовать или включить/отключить пару (только admin)
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema: {type: string, example: ba-en}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                active: {type: boolean}
+      responses:
+        '200':
+          description: Обновлённая пара
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LanguagePair'}
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Свой профиль
+      responses:
+        '200':
+          description: Профиль
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '401': {$ref: '#/components/responses/ApiError'}
+    patch:
+      tags: [Users]
+      summary: Обновить имя и пару
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName: {type: string}
+                languagePair: {type: string, enum: [ba-ru]}
+                schoolId: {type: string, format: uuid, nullable: true}
+      responses:
+        '200': {description: Обновлённый профиль}
+  /users/me/link-code:
+    get:
+      tags: [Users]
+      summary: Одноразовый код привязки Telegram
+      responses:
+        '200':
+          description: Код действует 15 минут
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: string}
+                  expiresInSeconds: {type: integer, example: 900}
+  /users/{id}/role:
+    post:
+      tags: [Users]
+      summary: Назначить роль (admin)
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: {type: string, enum: [student, teacher, moderator, admin]}
+      responses:
+        '200': {description: Роль изменена}
+        '403': {$ref: '#/components/responses/ApiError'}
+  /tasks/daily:
+    get:
+      tags: [Learning]
+      summary: Закреплённое ежедневное задание
+      parameters:
+        - name: langPair
+          in: query
+          schema: {type: string, default: ba-ru, enum: [ba-ru]}
+      responses:
+        '200':
+          description: Задание
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Task'}
+  /tasks/history:
+    get:
+      tags: [Learning]
+      summary: История заданий
+      responses:
+        '200': {description: Список items}
+  /tasks/{id}/answers:
+    post:
+      tags: [Learning]
+      summary: Подтвердить или исправить перевод
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SubmitAnswerRequest'}
+      responses:
+        '200':
+          description: Ответ сохранён, XP начислен
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubmitAnswerResponse'}
+        '409': {$ref: '#/components/responses/ApiError'}
+  /gamification/me:
+    get:
+      tags: [Gamification]
+      summary: XP, серия и статистика
+      responses:
+        '200':
+          description: Прогресс
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Progress'}
+  /gamification/achievements:
+    get:
+      tags: [Gamification]
+      summary: Достижения
+      responses:
+        '200': {description: Список достижений}
+  /leaderboards:
+    get:
+      tags: [Gamification]
+      summary: Рейтинг пользователей, классов, школ
+      parameters:
+        - {name: scope, in: query, schema: {type: string, enum: [global, school, class]}}
+        - {name: period, in: query, schema: {type: string, enum: [weekly, monthly, all]}}
+        - {name: metric, in: query, schema: {type: string, enum: [xp, activity]}}
+      responses:
+        '200': {description: Таблица рейтинга}
+  /materials:
+    get:
+      tags: [Content]
+      summary: Список материалов
+      responses:
+        '200': {description: Материалы}
+    post:
+      tags: [Content]
+      summary: Создать материал (moderator/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MaterialRequest'}
+      responses:
+        '201': {description: Материал создан}
+  /fragments:
+    get:
+      tags: [Content]
+      summary: Список текстовых фрагментов
+      responses:
+        '200': {description: Фрагменты}
+    post:
+      tags: [Content]
+      summary: Создать фрагмент (moderator/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/FragmentRequest'}
+      responses:
+        '201': {description: Фрагмент создан}
+  /fragments/{id}/candidates:
+    get:
+      tags: [Moderation]
+      summary: Варианты перевода с голосами (moderator/admin)
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '200': {description: Варианты}
+    post:
+      tags: [Moderation]
+      summary: Добавить исходный вариант перевода (moderator/admin)
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [translation]
+              properties:
+                translation: {type: string}
+                languagePair: {type: string, example: ba-ru}
+      responses:
+        '201': {description: Вариант добавлен}
+  /translations:
+    get:
+      tags: [Translation]
+      summary: Подтверждённые переводы
+      responses:
+        '200': {description: Список переводов}
+  /translations/export:
+    get:
+      tags: [Translation]
+      summary: Скачать подтверждённые переводы
+      parameters:
+        - {name: format, in: query, schema: {type: string, enum: [csv, json]}}
+        - {name: langPair, in: query, schema: {type: string, example: ba-ru}}
+      responses:
+        '200':
+          description: CSV или JSON
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/ExportTranslation'}}
+            text/csv:
+              schema: {type: string}
+  /schools:
+    get:
+      tags: [Education]
+      summary: Список школ
+      responses:
+        '200': {description: Школы}
+  /classes:
+    get:
+      tags: [Education]
+      summary: Мои классы
+      responses:
+        '200': {description: Классы}
+    post:
+      tags: [Education]
+      summary: Создать класс (teacher/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [schoolId, name]
+              properties:
+                schoolId: {type: string, format: uuid}
+                name: {type: string}
+      responses:
+        '201': {description: Класс создан}
+  /classes/{id}/students:
+    parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get:
+      tags: [Education]
+      summary: Ученики класса
+      responses:
+        '200': {description: Ученики}
+    post:
+      tags: [Education]
+      summary: Добавить ученика по UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [studentId]
+              properties:
+                studentId: {type: string, format: uuid}
+      responses:
+        '204': {description: Ученик добавлен}
+  /classes/{id}/statistics:
+    get:
+      tags: [Education]
+      summary: Отчёт по классу
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '200': {description: Статистика}
+  /moderation/cases:
+    get:
+      tags: [Moderation]
+      summary: Список спорных случаев
+      responses:
+        '200': {description: Список}
+  /moderation/cases/{id}/resolve:
+    post:
+      tags: [Moderation]
+      summary: Утвердить кандидат (moderator/admin)
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [candidateId]
+              properties:
+                candidateId: {type: string, format: uuid}
+                comment: {type: string}
+      responses:
+        '200': {description: Решение сохранено}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    ApiError:
+      description: Стандартизированная ошибка
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: {type: string}
+            message: {type: string}
+    RegisterRequest:
+      type: object
+      required: [email, password, displayName]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string, minLength: 8}
+        displayName: {type: string, minLength: 2}
+        languagePair: {type: string, enum: [ba-ru]}
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string}
+    AuthResponse:
+      type: object
+      properties:
+        accessToken: {type: string}
+        user: {$ref: '#/components/schemas/User'}
+    User:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        displayName: {type: string}
+        email: {type: string, format: email}
+        role: {type: string, enum: [student, teacher, moderator, admin]}
+        languagePair: {type: string}
+        xp: {type: integer}
+        streak: {type: integer}
+    LanguagePair:
+      type: object
+      properties:
+        code: {type: string}
+        sourceLang: {type: string}
+        targetLang: {type: string}
+        name: {type: string}
+        active: {type: boolean}
+    Task:
+      type: object
+      properties:
+        taskId: {type: string, format: uuid}
+        fragmentId: {type: string, format: uuid}
+        sourceText: {type: string}
+        suggestedTranslation: {type: string}
+        languagePair: {type: string}
+        status: {type: string, enum: [pending, completed]}
+        reward:
+          type: object
+          properties:
+            baseXp: {type: integer, example: 10}
+    SubmitAnswerRequest:
+      type: object
+      required: [answerType, translation, idempotencyKey]
+      properties:
+        answerType: {type: string, enum: [confirmation, correction]}
+        translation: {type: string}
+        idempotencyKey: {type: string, format: uuid}
+    SubmitAnswerResponse:
+      type: object
+      properties:
+        status: {type: string, enum: [accepted]}
+        xpEarned: {type: integer, description: Сумма базового XP и бонусов целей}
+        baseXp: {type: integer, example: 10}
+        questBonusXp: {type: integer}
+        unlockedQuests:
+          type: array
+          items: {type: string}
+        totalXp: {type: integer}
+        streak: {type: integer}
+    DailyQuest:
+      type: object
+      required: [code, title, description, goal, progress, rewardXp, completed, rewarded]
+      properties:
+        code: {type: string, enum: [three_translations, five_translations, one_correction]}
+        title: {type: string}
+        description: {type: string}
+        goal: {type: integer}
+        progress: {type: integer}
+        rewardXp: {type: integer}
+        completed: {type: boolean}
+        rewarded: {type: boolean}
+    DailyQuestsResponse:
+      type: object
+      properties:
+        date: {type: string, format: date}
+        quests:
+          type: array
+          items: {$ref: '#/components/schemas/DailyQuest'}
+    Progress:
+      type: object
+      properties:
+        xp: {type: integer}
+        level: {type: integer}
+        xpInLevel: {type: integer}
+        xpForNextLevel: {type: integer}
+        streak: {type: integer}
+        longestStreak: {type: integer}
+        completedTasks: {type: integer}
+        confirmedContributions: {type: integer}
+    MaterialRequest:
+      type: object
+      required: [title, type, license]
+      properties:
+        title: {type: string}
+        type: {type: string, enum: [text, audio]}
+        description: {type: string}
+        license: {type: string}
+        sourceUrl: {type: string}
+    FragmentRequest:
+      type: object
+      required: [materialId, textBa]
+      properties:
+        materialId: {type: string, format: uuid}
+        textBa: {type: string}
+        chapter: {type: string}
+        startOffset: {type: integer}
+        endOffset: {type: integer}
+        startTimeMs: {type: integer, format: int64}
+        endTimeMs: {type: integer, format: int64}
+    ExportTranslation:
+      type: object
+      properties:
+        fragment_id: {type: string, format: uuid}
+        text_ba: {type: string}
+        lang_pair: {type: string}
+        translation: {type: string}
+        source:
+          type: object
+          properties:
+            materialId: {type: string, format: uuid}
+            title: {type: string}
+            chapter: {type: string, nullable: true}
+            startOffset: {type: integer, nullable: true}
+            endOffset: {type: integer, nullable: true}
+            startTimeMs: {type: integer, format: int64, nullable: true}
+            endTimeMs: {type: integer, format: int64, nullable: true}
+        confirmed: {type: integer}
+        status: {type: string, enum: [confirmed]}

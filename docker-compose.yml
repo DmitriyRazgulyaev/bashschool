@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bashkir}
+      POSTGRES_USER: ${POSTGRES_USER:-bashkir}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bashkir}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 15
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-bashkir}:${POSTGRES_PASSWORD:-bashkir}@db:5432/${POSTGRES_DB:-bashkir}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?Copy .env.example to .env and set JWT_SECRET}
+      WEB_ORIGIN: http://localhost:5173
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_API_URL: ${AI_API_URL:-https://api.openai.com/v1/chat/completions}
+      AI_MODEL: ${AI_MODEL:-gpt-4.1-mini}
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+  web:
+    build:
+      context: frontend
+      args:
+        VITE_API_URL: http://localhost:8080/api/v1
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+volumes:
+  postgres_data:
