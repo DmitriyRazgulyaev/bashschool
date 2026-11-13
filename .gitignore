@@ -1,0 +1,20 @@
+# секреты
+.env
+*.env
+!.env.example
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Go
+backend/bashschool
+backend/*.exe
+
+# IDE и система
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
